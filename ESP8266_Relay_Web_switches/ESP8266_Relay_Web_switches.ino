@@ -8,8 +8,8 @@
 #define LWIP_HTTPD_SUPPORT_11_KEEPALIVE 0
 
 // Configuración WiFi
-const char* ssid = "HoMeRooT3D";
-const char* password = "T3t45Al4iR3";
+const char* ssid = "SSID";
+const char* password = "PASSWORD";
 
 // Configuración de pines
 #define NUM_RELAYS 1
