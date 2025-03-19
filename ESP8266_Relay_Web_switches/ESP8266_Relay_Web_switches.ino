@@ -8,12 +8,12 @@
 #define LWIP_HTTPD_SUPPORT_11_KEEPALIVE 0
 
 // Configuración WiFi
-const char* ssid = "TUSSID";
-const char* password = "TUPASSWORD";
+const char* ssid = "HoMeRooT3D";
+const char* password = "T3t45Al4iR3";
 
 // Configuración de pines
-#define NUM_RELAYS 6
-const uint8_t relayPins[NUM_RELAYS] = {D1, D2, D3, D4, D5, D6};
+#define NUM_RELAYS 1
+const uint8_t relayPins[NUM_RELAYS] = {D2};
 
 // Certificados (generar con los pasos posteriores)
 static const uint8_t cert[] PROGMEM = {
@@ -195,17 +195,28 @@ BearSSL::ESP8266WebServerSecure serverHTTPS(443);
 BearSSL::CertStore certStore;
 bool relayStates[NUM_RELAYS] = {false};
 
+// Función de logging mejorada
+void logEvent(const String& message) {
+  static unsigned long startTime = millis();
+  unsigned long elapsed = (millis() - startTime) / 1000; // Tiempo en segundos
+  
+  String logEntry = "[" + String(elapsed) + "s] " + message;
+  Serial.println(logEntry);
+}
+
 void setup() {
   Serial.begin(115200);
-  serverHTTP.begin();
-  serverHTTPS.begin();
-
+  
   // Inicializar EEPROM
   EEPROM.begin(512);
   for(int i=0; i<NUM_RELAYS; i++) {
-    relayStates[i] = EEPROM.read(i);
+    relayStates[i] = false; //EEPROM.read(i);
+    EEPROM.write(i, 0);
     pinMode(relayPins[i], OUTPUT);
     digitalWrite(relayPins[i], relayStates[i]);
+    
+    // Log estado inicial
+    logEvent("Relé " + String(i+1) + " inicializado a: " + (relayStates[i] ? "ON" : "OFF"));
   }
 
   // Configurar SSL
@@ -216,17 +227,22 @@ void setup() {
 
   // Conectar a WiFi
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) delay(500);
-  Serial.print("\nConectado! IP: ");
-  Serial.println(WiFi.localIP());
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    logEvent("Conectando a WiFi...");
+  }
+  logEvent("Conectado a WiFi! IP: " + WiFi.localIP().toString());
 
+  // Configurar redirección HTTP->HTTPS
   serverHTTP.onNotFound([](){
-  String redirectUrl = "https://" + WiFi.localIP().toString() + serverHTTP.uri();
-  serverHTTP.sendHeader("Location", redirectUrl);
-  serverHTTP.send(301, "text/plain", "Redirigiendo a HTTPS...");
-});
+    String url = "https://" + WiFi.localIP().toString() + serverHTTP.uri();
+    serverHTTP.sendHeader("Location", url);
+    serverHTTP.send(302, "text/plain", "Redirigiendo a HTTPS...");
+    logEvent("Redirección HTTP a: " + url);
+  });
+  serverHTTP.begin();
 
-  // Configurar rutas
+// Configurar rutas
   serverHTTPS.on("/", []() {
     String html = R"=====(
     <!DOCTYPE html>
@@ -325,26 +341,36 @@ void setup() {
     </html>
     )=====";
     serverHTTPS.send(200, "text/html", html);
+    logEvent("Página principal solicitada");
   });
 
   for(int i=1; i<=NUM_RELAYS; i++) {
     serverHTTPS.on(("/relay"+String(i)).c_str(), [i](){
-      relayStates[i-1] = !relayStates[i-1];
-      digitalWrite(relayPins[i-1], relayStates[i-1]);
-      EEPROM.write(i-1, relayStates[i-1]);
+      bool newState = !relayStates[i-1];
+      relayStates[i-1] = newState;
+      digitalWrite(relayPins[i-1], newState);
+      EEPROM.write(i-1, newState);
       EEPROM.commit();
+      
+      // Log detallado
+      String logMsg = "Relé " + String(i) + " cambiado a: ";
+      logMsg += newState ? "ON" : "OFF";
+      logMsg += " | IP Cliente: " + serverHTTPS.client().remoteIP().toString();
+      logEvent(logMsg);
+      
       serverHTTPS.send(200, "text/plain", "OK");
     });
   }
 
   serverHTTPS.on("/status", []() {
     String json = "{";
-    for(int i=0; i<NUM_RELAYS; i++) {
+    for(int i=0; i<NUM_RELAYS; i++){
       json += "\"relay" + String(i+1) + "\":" + String(relayStates[i] ? "true" : "false");
       if(i < NUM_RELAYS-1) json += ",";
     }
     json += "}";
     serverHTTPS.send(200, "application/json", json);
+    logEvent("Estado solicitado por: " + serverHTTPS.client().remoteIP().toString());
   });
 }
 
