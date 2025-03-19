@@ -4,8 +4,8 @@
 #include <CertStoreBearSSL.h>
 
 // Configuración WiFi
-const char* ssid = "HoMeRooT3D";
-const char* password = "T3t45Al4iR3";
+const char* ssid = "TUWIFI";
+const char* password = "TUPASSWORD";
 
 // Configuración de pines
 #define NUM_RELAYS 6
