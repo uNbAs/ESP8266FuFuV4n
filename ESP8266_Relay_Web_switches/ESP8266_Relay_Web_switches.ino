@@ -3,15 +3,19 @@
 #include <EEPROM.h>
 #include <CertStoreBearSSL.h>
 
+// Configuración para reducir memoria
+#define USE_LWIP_HIGH_PERFORMANCE 1
+#define LWIP_HTTPD_SUPPORT_11_KEEPALIVE 0
+
 // Configuración WiFi
-const char* ssid = "TUWIFI";
+const char* ssid = "TUSSID";
 const char* password = "TUPASSWORD";
 
 // Configuración de pines
 #define NUM_RELAYS 6
 const uint8_t relayPins[NUM_RELAYS] = {D1, D2, D3, D4, D5, D6};
 
-// Certificado autofirmado (pre-generado)
+// Certificados (generar con los pasos posteriores)
 static const uint8_t cert[] PROGMEM = {
   0x30, 0x82, 0x03, 0x05, 0x30, 0x82, 0x01, 0xed, 0xa0, 0x03, 0x02, 0x01,
   0x02, 0x02, 0x14, 0x1d, 0x61, 0x82, 0x36, 0x60, 0x31, 0x47, 0x8c, 0xa8,
@@ -185,13 +189,17 @@ static const uint8_t key[] PROGMEM = {
   0x88, 0x21, 0xf3, 0x9b, 0x87, 0x38
 };
 
-BearSSL::ESP8266WebServerSecure server(443);
+// Servidores
+ESP8266WebServer serverHTTP(80);
+BearSSL::ESP8266WebServerSecure serverHTTPS(443);
 BearSSL::CertStore certStore;
 bool relayStates[NUM_RELAYS] = {false};
 
 void setup() {
   Serial.begin(115200);
-  
+  serverHTTP.begin();
+  serverHTTPS.begin();
+
   // Inicializar EEPROM
   EEPROM.begin(512);
   for(int i=0; i<NUM_RELAYS; i++) {
@@ -203,8 +211,8 @@ void setup() {
   // Configurar SSL
   BearSSL::X509List *serverCertList = new BearSSL::X509List(cert, sizeof(cert));
   BearSSL::PrivateKey *serverPrivateKey = new BearSSL::PrivateKey(key, sizeof(key));
-  server.setRSACert(serverCertList, serverPrivateKey);
-  server.begin();
+  serverHTTPS.setRSACert(serverCertList, serverPrivateKey);
+  serverHTTPS.begin();
 
   // Conectar a WiFi
   WiFi.begin(ssid, password);
@@ -212,8 +220,14 @@ void setup() {
   Serial.print("\nConectado! IP: ");
   Serial.println(WiFi.localIP());
 
+  serverHTTP.onNotFound([](){
+  String redirectUrl = "https://" + WiFi.localIP().toString() + serverHTTP.uri();
+  serverHTTP.sendHeader("Location", redirectUrl);
+  serverHTTP.send(301, "text/plain", "Redirigiendo a HTTPS...");
+});
+
   // Configurar rutas
-  server.on("/", []() {
+  serverHTTPS.on("/", []() {
     String html = R"=====(
     <!DOCTYPE html>
     <html>
@@ -310,30 +324,31 @@ void setup() {
     </body>
     </html>
     )=====";
-    server.send(200, "text/html", html);
+    serverHTTPS.send(200, "text/html", html);
   });
 
   for(int i=1; i<=NUM_RELAYS; i++) {
-    server.on(("/relay"+String(i)).c_str(), [i](){
+    serverHTTPS.on(("/relay"+String(i)).c_str(), [i](){
       relayStates[i-1] = !relayStates[i-1];
       digitalWrite(relayPins[i-1], relayStates[i-1]);
       EEPROM.write(i-1, relayStates[i-1]);
       EEPROM.commit();
-      server.send(200, "text/plain", "OK");
+      serverHTTPS.send(200, "text/plain", "OK");
     });
   }
 
-  server.on("/status", []() {
+  serverHTTPS.on("/status", []() {
     String json = "{";
     for(int i=0; i<NUM_RELAYS; i++) {
       json += "\"relay" + String(i+1) + "\":" + String(relayStates[i] ? "true" : "false");
       if(i < NUM_RELAYS-1) json += ",";
     }
     json += "}";
-    server.send(200, "application/json", json);
+    serverHTTPS.send(200, "application/json", json);
   });
 }
 
 void loop() {
-  server.handleClient();
+  serverHTTP.handleClient();
+  serverHTTPS.handleClient();
 }
