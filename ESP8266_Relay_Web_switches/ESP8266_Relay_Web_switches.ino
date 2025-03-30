@@ -3,17 +3,15 @@
 #include <EEPROM.h>
 #include <CertStoreBearSSL.h>
 
-// Configuración para reducir memoria
-#define USE_LWIP_HIGH_PERFORMANCE 1
-#define LWIP_HTTPD_SUPPORT_11_KEEPALIVE 0
-
 // Configuración WiFi
 const char* ssid = "SSID";
 const char* password = "PASSWORD";
 
-// Configuración de pines
+// Configuración de hardware
 #define NUM_RELAYS 1
-const uint8_t relayPins[NUM_RELAYS] = {D2};
+const uint8_t relayPins[NUM_RELAYS] = {D2};  // Pines de los relés
+const int EEPROM_INIT_FLAG = 0xAA;           // Bandera de inicialización
+const int EEPROM_INIT_ADDR = 500;            // Dirección EEPROM para bandera
 
 // Certificados (generar con los pasos posteriores)
 static const uint8_t cert[] PROGMEM = {
@@ -188,61 +186,83 @@ static const uint8_t key[] PROGMEM = {
   0x7f, 0x22, 0x8f, 0xcb, 0x1a, 0x88, 0x71, 0xbf, 0x69, 0xc7, 0x68, 0x5d,
   0x88, 0x21, 0xf3, 0x9b, 0x87, 0x38
 };
-
 // Servidores
 ESP8266WebServer serverHTTP(80);
 BearSSL::ESP8266WebServerSecure serverHTTPS(443);
 BearSSL::CertStore certStore;
 bool relayStates[NUM_RELAYS] = {false};
 
-// Función de logging mejorada
-void logEvent(const String& message) {
-  static unsigned long startTime = millis();
-  unsigned long elapsed = (millis() - startTime) / 1000; // Tiempo en segundos
-  
-  String logEntry = "[" + String(elapsed) + "s] " + message;
-  Serial.println(logEntry);
+// ================== FUNCIONES CRÍTICAS ==================
+void initializeEEPROM() {
+  EEPROM.begin(512);
+  if (EEPROM.read(EEPROM_INIT_ADDR) != EEPROM_INIT_FLAG) {
+    logEvent("INICIALIZANDO EEPROM POR PRIMERA VEZ");
+    for(int i=0; i<NUM_RELAYS; i++) {
+      EEPROM.write(i, 0);  // Fuerza estado inicial: APAGADO
+    }
+    EEPROM.write(EEPROM_INIT_ADDR, EEPROM_INIT_FLAG);
+    EEPROM.commit();
+    delay(200);
+  }
 }
 
+void setRelayState(uint8_t relay, bool state) {
+  relayStates[relay] = state;
+  digitalWrite(relayPins[relay], state ? LOW : HIGH);  // LOW para activar relé
+  EEPROM.write(relay, state);
+  EEPROM.commit();
+  
+  // Log detallado
+  String logMsg = "RELE " + String(relay+1) + " | ";
+  logMsg += "SW:" + String(state ? "ON" : "OFF") + " ";
+  logMsg += "HW:" + String(state ? "ON" : "OFF") + " ";
+  logMsg += "IP:" + serverHTTPS.client().remoteIP().toString();
+  logEvent(logMsg);
+}
+
+void logEvent(const String& message) {
+  static unsigned long start = millis();
+  Serial.printf("[%6.1fs] %s\n", (millis()-start)/1000.0, message.c_str());
+}
+
+// ================== SETUP PRINCIPAL ==================
 void setup() {
   Serial.begin(115200);
-  
-  // Inicializar EEPROM
-  EEPROM.begin(512);
+  initializeEEPROM();
+
+  // Inicialización segura de relés
   for(int i=0; i<NUM_RELAYS; i++) {
-    relayStates[i] = false; //EEPROM.read(i);
-    EEPROM.write(i, 0);
+    bool savedState = EEPROM.read(i);  // Leer estado persistente
     pinMode(relayPins[i], OUTPUT);
-    digitalWrite(relayPins[i], relayStates[i]);
+    setRelayState(i, savedState);  // Usar función controlada
     
-    // Log estado inicial
-    logEvent("Relé " + String(i+1) + " inicializado a: " + (relayStates[i] ? "ON" : "OFF"));
+    // Verificación física inmediata
+    bool physicalState = (digitalRead(relayPins[i]) == LOW);
+    logEvent("INICIO - Rele " + String(i+1) + 
+            " | SW:" + String(savedState ? "ON" : "OFF") + 
+            " | HW:" + String(physicalState ? "ON" : "OFF"));
   }
 
   // Configurar SSL
-  BearSSL::X509List *serverCertList = new BearSSL::X509List(cert, sizeof(cert));
-  BearSSL::PrivateKey *serverPrivateKey = new BearSSL::PrivateKey(key, sizeof(key));
-  serverHTTPS.setRSACert(serverCertList, serverPrivateKey);
+  BearSSL::X509List *certList = new BearSSL::X509List(cert, sizeof(cert));
+  BearSSL::PrivateKey *privKey = new BearSSL::PrivateKey(key, sizeof(key));
+  serverHTTPS.setRSACert(certList, privKey);
   serverHTTPS.begin();
 
-  // Conectar a WiFi
+  // Conectar WiFi
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    logEvent("Conectando a WiFi...");
-  }
-  logEvent("Conectado a WiFi! IP: " + WiFi.localIP().toString());
+  while(WiFi.status() != WL_CONNECTED) delay(500);
+  logEvent("WIFI CONECTADO - IP: " + WiFi.localIP().toString());
 
-  // Configurar redirección HTTP->HTTPS
+  // Redirección HTTP->HTTPS
   serverHTTP.onNotFound([](){
-    String url = "https://" + WiFi.localIP().toString() + serverHTTP.uri();
-    serverHTTP.sendHeader("Location", url);
+    serverHTTP.sendHeader("Location", "https://" + WiFi.localIP().toString());
     serverHTTP.send(302, "text/plain", "Redirigiendo a HTTPS...");
-    logEvent("Redirección HTTP a: " + url);
   });
   serverHTTP.begin();
 
-// Configurar rutas
+  // ================== PÁGINA WEB COMPLETA ==================
+  // Configurar rutas
   serverHTTPS.on("/", []() {
     String html = R"=====(
     <!DOCTYPE html>
@@ -343,34 +363,23 @@ void setup() {
     serverHTTPS.send(200, "text/html", html);
     logEvent("Página principal solicitada");
   });
-
+  
+  // Endpoints de control
   for(int i=1; i<=NUM_RELAYS; i++) {
     serverHTTPS.on(("/relay"+String(i)).c_str(), [i](){
-      bool newState = !relayStates[i-1];
-      relayStates[i-1] = newState;
-      digitalWrite(relayPins[i-1], newState);
-      EEPROM.write(i-1, newState);
-      EEPROM.commit();
-      
-      // Log detallado
-      String logMsg = "Relé " + String(i) + " cambiado a: ";
-      logMsg += newState ? "ON" : "OFF";
-      logMsg += " | IP Cliente: " + serverHTTPS.client().remoteIP().toString();
-      logEvent(logMsg);
-      
+      setRelayState(i-1, !relayStates[i-1]);
       serverHTTPS.send(200, "text/plain", "OK");
     });
   }
 
   serverHTTPS.on("/status", []() {
     String json = "{";
-    for(int i=0; i<NUM_RELAYS; i++){
-      json += "\"relay" + String(i+1) + "\":" + String(relayStates[i] ? "true" : "false");
+    for(int i=0; i<NUM_RELAYS; i++) {
+      json += "\"relay" + String(i+1) + "\":" + String(relayStates[i]);
       if(i < NUM_RELAYS-1) json += ",";
     }
     json += "}";
     serverHTTPS.send(200, "application/json", json);
-    logEvent("Estado solicitado por: " + serverHTTPS.client().remoteIP().toString());
   });
 }
 
